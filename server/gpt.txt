@@ -1,0 +1,185 @@
+//auth-middleware.js
+
+const ApiError = require("../exceptions/api-errors")
+const TokenService = require("../service/token-service")
+module.exports = (req, res, next)=>{
+  try {
+    const authorizationHeader = req.headers.authorization
+    if(!authorizationHeader){
+      return next(ApiError.UnauthorizedError()) 
+    }
+    const accessToken = authorizationHeader.split(' ')[1]
+    if(!accessToken){
+      return next(ApiError.UnauthorizedError()) 
+    }
+    const userData = TokenService.validateAccessToken(accessToken)
+    if(!userData){
+      return next(ApiError.UnauthorizedError()) 
+    }
+
+    req.user = userData
+    next()
+  }
+  catch (e) {
+    next(ApiError.UnauthorizedError())
+  }
+}
+
+
+
+
+//token-service.js
+
+const jwt = require("jsonwebtoken")
+const tokenModel = require("../models/token")
+class TokenService{
+    generateToken(payload){
+        const access = jwt.sign(payload, process.env.ACCESS_SECRET_KEY, {expiresIn: '30m'})
+        const refresh = jwt.sign(payload, process.env.REFRESH_SECRET_KEY, {expiresIn: '30d'})
+        return{
+            access,
+            refresh
+        }
+    }
+    async saveToken(userId, refreshToken){
+        const tokenData = await tokenModel.findOne({user: userId})
+        if(tokenData){
+            tokenData.refreshToken = refreshToken
+            return tokenData.save()
+        }
+        return await tokenModel.create({user: userId, refreshToken})
+    }
+    async removeToken(refreshToken){
+        const tokenData  = await tokenModel.deleteOne({refreshToken})
+        return tokenData
+    }
+
+    async validateAccessToken(token){
+        try {
+            const userData = jwt.verify(token, process.env.ACCESS_SECRET_KEY)
+            return userData
+        }
+        catch (e) {
+            return null
+        }
+    }
+    async validateRefreshToken(token){
+        try {
+            const userData = jwt.verify(token, process.env.REFRESH_SECRET_KEY)
+            return userData
+        }
+        catch (e) {
+            return null
+        }
+    }
+    async findToken(token){
+        const tokenData = await tokenModel.findOne({refreshToken: token})
+        return tokenData
+    }
+}
+
+module.exports = new TokenService()
+
+
+
+//.env
+
+PORT=5000
+DB_URL=mongodb+srv://root:root@authcluster.mwfrg2w.mongodb.net/?retryWrites=true&w=majority
+ACCESS_SECRET_KEY=jwt-secret-access-key
+REFRESH_SECRET_KEY=jwt-secret-refresh-key
+API_URL=http://localhost:5000
+
+
+
+//router.js
+
+const Router = require("express").Router
+const router = new Router()
+const userController = require("../controller/user-controller")
+const authMiddleware = require("../middleware/auth-middleware")
+const {body} = require("express-validator")
+
+router.post('/registration',
+    body('email').isEmail(),
+    body('password').isLength({min: 4, max: 32}),
+    userController.registration)
+router.post('/login', userController.login)
+router.post('/logout', userController.logout)
+router.get('/refresh', userController.refresh)
+router.get('/users', authMiddleware, userController.getUsers)
+
+module.exports = router
+
+
+
+//api-errors.js
+
+module.exports = class ApiErrors extends Error{
+    status
+    error
+    constructor(status, message, errors = []) {
+        super(message);
+        this.status = status
+        this.error = errors
+    }
+    static UnauthorizedError(){
+        return new ApiErrors(401, "User is unauthorized", )
+    }
+    static BadRequest( message, errors = []){
+        return new ApiErrors(400, message, errors)
+    }
+}
+
+
+
+//error-middleware.js
+
+const ApiError = require("../exceptions/api-errors")
+
+module.exports = function (err, req, res, next){
+    console.log(err)
+    if(err instanceof ApiError){
+        return res
+            .status(err.status)
+            .json({
+            message: err.message,
+            errors: err.errors
+        })
+    }
+    return res.status(500).json({message: "Непредвиденная ошибка"})
+}
+
+
+//index.js
+
+require("dotenv").config()
+const express = require("express")
+const cors = require("cors")
+const cookieParser = require("cookie-parser")
+const mongoose = require("mongoose")
+const PORT = process.env.PORT || 5000
+const router = require("./router/index")
+const app = express()
+const errorMiddleware = require("./middleware/error-middleware")
+
+app.use(express.json())
+app.use(cookieParser())
+app.use(cors())
+app.use("/api", router)
+app.use(errorMiddleware)
+
+const start = async () => {
+    try {
+        await mongoose.connect(process.env.DB_URL, {
+                useNewUrlParser: true,
+                useUnifiedTopology: true
+        })
+        app.listen(PORT, ()=> console.log("started at " + PORT))
+    }
+    catch (e){
+        console.log(e.message)
+    }
+}
+
+start()
